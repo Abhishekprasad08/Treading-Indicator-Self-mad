@@ -1,0 +1,117 @@
+//@version=5
+indicator("SMC Toolkit: OB, FVG, MSS, EMA + RR 1:5 + Table", overlay=true)
+
+// === INPUTS === //
+emaFastLen = input.int(9, "Fast EMA")
+emaSlowLen = input.int(21, "Slow EMA")
+rrRatio = 5.0  // Fixed Risk-Reward Ratio 1:5 (no user input)
+
+showOB = input.bool(true, "Show Order Blocks")
+showFVG = input.bool(true, "Show Fair Value Gaps")
+showMSS = input.bool(true, "Show Market Structure Shift")
+showEMA = input.bool(true, "Show EMAs")
+
+// === Table Color Inputs === //
+headerBgColor = input.color(color.gray, "Table Header BG Color")
+headerTextColor = input.color(color.white, "Table Header Text Color")
+rowBgColor = input.color(color.black, "Table Row BG Color")
+rowTextColor = input.color(color.white, "Table Row Text Color")
+
+// === EMAs === //
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+plot(showEMA ? emaFast : na, "Fast EMA", color=color.green)
+plot(showEMA ? emaSlow : na, "Slow EMA", color=color.red)
+
+// === EMA Cross Buy/Sell Signals === //
+buySignal = ta.crossover(emaFast, emaSlow)
+sellSignal = ta.crossunder(emaFast, emaSlow)
+
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// === Market Structure Shift (MSS) === //
+var float lastHigh = na
+var float lastLow = na
+bullishMSS = high > lastHigh and close > high[1] and low[1] < low[2]
+bearishMSS = low < lastLow and close < low[1] and high[1] > high[2]
+lastHigh := ta.highest(high, 10)
+lastLow := ta.lowest(low, 10)
+
+plotshape(showMSS and bullishMSS ? low : na, location=location.belowbar, color=color.green, style=shape.labelup, text="MSS↑")
+plotshape(showMSS and bearishMSS ? high : na, location=location.abovebar, color=color.red, style=shape.labeldown, text="MSS↓")
+
+// === Order Blocks === //
+isBullOB = close[2] < open[2] and close[1] > open[1]
+isBearOB = close[2] > open[2] and close[1] < open[1]
+bullOBLevel = isBullOB ? low[2] : na
+bearOBLevel = isBearOB ? high[2] : na
+
+plot(showOB and not na(bullOBLevel) ? bullOBLevel : na, "Bullish OB", style=plot.style_linebr, color=color.green, linewidth=2)
+plot(showOB and not na(bearOBLevel) ? bearOBLevel : na, "Bearish OB", style=plot.style_linebr, color=color.red, linewidth=2)
+
+// === Fair Value Gap (FVG) === //
+fvgUp = low > high[2]
+fvgDown = high < low[2]
+
+plotshape(showFVG and fvgUp ? low : na, location=location.belowbar, style=shape.triangleup, color=color.teal, text="FVG↑")
+plotshape(showFVG and fvgDown ? high : na, location=location.abovebar, style=shape.triangledown, color=color.orange, text="FVG↓")
+
+// === TRADE TRACKING VARIABLES === //
+var table tradeTable = table.new(position.bottom_right, 6, 2, border_width=1)
+
+var string entryType = ""
+var float entryPrice = na
+var float exitPrice = na
+var float stopLoss = na
+var float targetPrice = na
+var bool inPosition = false
+
+// === Swing High/Low === //
+swingLow = ta.lowest(low, 5)
+swingHigh = ta.highest(high, 5)
+
+// === ENTRY LOGIC === //
+if buySignal
+    entryType := "BUY"
+    entryPrice := close
+    stopLoss := swingLow
+    risk = entryPrice - stopLoss
+    targetPrice := entryPrice + rrRatio * risk
+    inPosition := true
+
+if sellSignal
+    entryType := "SELL"
+    entryPrice := close
+    stopLoss := swingHigh
+    risk = stopLoss - entryPrice
+    targetPrice := entryPrice - rrRatio * risk
+    inPosition := true
+
+// === EXIT LOGIC === //
+if inPosition
+    if (entryType == "BUY" and sellSignal)
+        exitPrice := close
+        inPosition := false
+    else if (entryType == "SELL" and buySignal)
+        exitPrice := close
+        inPosition := false
+
+// === TABLE DISPLAY === //
+if bar_index % 5 == 0
+    // Header row
+    table.cell(tradeTable, 0, 0, "Type", text_color=headerTextColor, bgcolor=headerBgColor)
+    table.cell(tradeTable, 1, 0, "Entry", text_color=headerTextColor, bgcolor=headerBgColor)
+    table.cell(tradeTable, 2, 0, "Exit", text_color=headerTextColor, bgcolor=headerBgColor)
+    table.cell(tradeTable, 3, 0, "SL", text_color=headerTextColor, bgcolor=headerBgColor)
+    table.cell(tradeTable, 4, 0, "TP (1:5)", text_color=headerTextColor, bgcolor=headerBgColor)
+    table.cell(tradeTable, 5, 0, "Status", text_color=headerTextColor, bgcolor=headerBgColor)
+
+    // Data row
+    table.cell(tradeTable, 0, 1, entryType, text_color=rowTextColor, bgcolor=rowBgColor)
+    table.cell(tradeTable, 1, 1, str.tostring(entryPrice, format.mintick), text_color=rowTextColor, bgcolor=rowBgColor)
+    table.cell(tradeTable, 2, 1, str.tostring(exitPrice, format.mintick), text_color=rowTextColor, bgcolor=rowBgColor)
+    table.cell(tradeTable, 3, 1, str.tostring(stopLoss, format.mintick), text_color=rowTextColor, bgcolor=rowBgColor)
+    table.cell(tradeTable, 4, 1, str.tostring(targetPrice, format.mintick), text_color=rowTextColor, bgcolor=rowBgColor)
+    table.cell(tradeTable, 5, 1, inPosition ? "OPEN" : "CLOSED", text_color=inPosition ? color.green : color.red, bgcolor=rowBgColor)

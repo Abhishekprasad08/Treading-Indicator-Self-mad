@@ -1,0 +1,449 @@
+//@version=5
+indicator("SMC ICT Enhanced with Buy/Sell Signals", overlay=true, max_labels_count=200, max_lines_count=100)
+
+// === COLOR SCHEME === //
+bg_color = color.white
+text_color = color.black
+border_color = color.gray
+bullish_color = color.new(#26A69A, 0)  // Teal
+bearish_color = color.new(#EF5350, 0)  // Red
+neutral_color = color.new(#78909C, 0)  // Blue-gray
+signal_color_buy = color.new(#4CAF50, 0)  // Green
+signal_color_sell = color.new(#EC407A, 0)  // Pink
+highlight_color = color.new(#FFA000, 0)  // Amber
+ema_fast_color = color.new(#2196F3, 0)  // Blue
+ema_slow_color = color.new(#FF9800, 0)  // Orange
+ema_trend_color = color.new(#607D8B, 0) // Dark gray
+zone_color_bull = color.new(#26A69A, 90)
+zone_color_bear = color.new(#EF5350, 90)
+ob_color_bull = color.new(#26A69A, 70)
+ob_color_bear = color.new(#EF5350, 70)
+
+// === INPUTS === //
+swing_length = input.int(5, title="Swing High/Low Length", minval=2, maxval=50)
+liquidity_lookback = input.int(20, title="Liquidity Pool Lookback", minval=5, maxval=100)
+bos_confirmation = input.int(3, title="BOS Confirmation Candles", minval=1, maxval=10)
+show_structure = input.bool(true, title="Show Market Structure")
+show_liquidity = input.bool(true, title="Show Liquidity Zones")
+show_ob = input.bool(true, title="Show Order Blocks")
+show_signals = input.bool(true, title="Show Buy/Sell Signals")
+signal_sensitivity = input.float(0.7, title="Signal Sensitivity", minval=0.1, maxval=1.0, step=0.1)
+atr_length = input.int(14, title="ATR Length for Stop Loss", minval=1, maxval=50)
+atr_multiplier = input.float(2.0, title="ATR Multiplier for Stop Loss", minval=0.5, maxval=5.0, step=0.1)
+
+// === KILL ZONE TIME CONFIGURATION === //
+// All times are in exchange time (chart time)
+// NY Kill Zone (7:00 AM - 10:00 AM EST)
+nyStart = hour == 7 and minute >= 0
+nyEnd = hour == 10 and minute <= 0
+nyKillZone = (hour >= 7 and hour < 10) or (nyStart or nyEnd)
+
+// London Kill Zone (2:00 AM - 5:00 AM EST)
+londonStart = hour == 2 and minute >= 0
+londonEnd = hour == 5 and minute <= 0
+londonKillZone = (hour >= 2 and hour < 5) or (londonStart or londonEnd)
+
+// Asian Kill Zone (8:00 PM - 2:00 AM EST)
+asianStart = hour == 20 and minute >= 0  // 8 PM
+asianEnd = hour == 2 and minute <= 0     // 2 AM
+asianKillZone = (hour >= 20 or hour < 2) or (asianStart or asianEnd)
+
+// === TECHNICAL INDICATORS === //
+ema_fast = ta.ema(close, 9)
+ema_slow = ta.ema(close, 21)
+ema_trend = ta.ema(close, 50)
+rsi = ta.rsi(close, 14)
+rsi_oversold = rsi < 30
+rsi_overbought = rsi > 70
+vol_ma = ta.sma(volume, 20)
+high_volume = volume > vol_ma * 1.5
+atr_value = ta.atr(atr_length)
+
+// === MARKET STRUCTURE === //
+swing_high = ta.pivothigh(high, swing_length, swing_length)
+swing_low = ta.pivotlow(low, swing_length, swing_length)
+
+var float last_high = na
+var float last_low = na
+var int last_high_bar = na
+var int last_low_bar = na
+
+if not na(swing_high)
+    last_high := swing_high
+    last_high_bar := bar_index - swing_length
+
+if not na(swing_low)
+    last_low := swing_low
+    last_low_bar := bar_index - swing_length
+
+var bool bullish_structure = na
+var bool bearish_structure = na
+var bool structure_break = false
+
+if not na(last_high) and not na(last_low)
+    prev_bullish = bullish_structure
+    prev_bearish = bearish_structure
+    
+    if high > last_high and low > last_low
+        bullish_structure := true
+        bearish_structure := false
+        structure_break := not prev_bullish
+    else if high < last_high and low < last_low
+        bullish_structure := false
+        bearish_structure := true
+        structure_break := not prev_bearish
+
+// === LIQUIDITY ZONES === //
+equal_highs = ta.highest(high, liquidity_lookback)
+equal_lows = ta.lowest(low, liquidity_lookback)
+bsl_level = equal_highs
+ssl_level = equal_lows
+liquidity_grab_up = high > bsl_level[1] and close < bsl_level[1] and high_volume
+liquidity_grab_down = low < ssl_level[1] and close > ssl_level[1] and high_volume
+
+// === ORDER BLOCKS === //
+bullish_ob_condition = close[1] < open[1] and close > open and close > high[1]
+bearish_ob_condition = close[1] > open[1] and close < open and close < low[1]
+
+var float bull_ob_high = na
+var float bull_ob_low = na
+var float bear_ob_high = na
+var float bear_ob_low = na
+var int bull_ob_time = na
+var int bear_ob_time = na
+
+if bullish_ob_condition
+    bull_ob_high := high[1]
+    bull_ob_low := low[1]
+    bull_ob_time := bar_index
+
+if bearish_ob_condition
+    bear_ob_high := high[1]
+    bear_ob_low := low[1]
+    bear_ob_time := bar_index
+
+bull_ob_valid = not na(bull_ob_high) and bar_index - bull_ob_time <= 50
+bear_ob_valid = not na(bear_ob_high) and bar_index - bear_ob_time <= 50
+
+// === FAIR VALUE GAPS === //
+bullish_fvg = low > high[2] and close[1] > open[1]
+bearish_fvg = high < low[2] and close[1] < open[1]
+
+var float bull_fvg_top = na
+var float bull_fvg_bottom = na
+var float bear_fvg_top = na
+var float bear_fvg_bottom = na
+
+if bullish_fvg
+    bull_fvg_top := low
+    bull_fvg_bottom := high[2]
+
+if bearish_fvg
+    bear_fvg_top := low[2]
+    bear_fvg_bottom := high
+
+// === PREMIUM/DISCOUNT ZONES === //
+range_high = ta.highest(high, 100)
+range_low = ta.lowest(low, 100)
+equilibrium = (range_high + range_low) / 2
+premium_zone = close > equilibrium
+discount_zone = close < equilibrium
+
+// === TREND CONFIRMATION === //
+ema_bullish = ema_fast > ema_slow and close > ema_trend
+ema_bearish = ema_fast < ema_slow and close < ema_trend
+
+// === SIGNAL LOGIC === //
+// BUY CONDITIONS
+buy_condition_1 = liquidity_grab_down and discount_zone and bullish_structure
+buy_condition_2 = bull_ob_valid and close >= bull_ob_low and close <= bull_ob_high and ema_bullish
+buy_condition_3 = bullish_fvg and discount_zone and rsi_oversold and high_volume
+buy_condition_4 = structure_break and bullish_structure and discount_zone and (nyKillZone or londonKillZone)
+buy_condition_5 = close > ema_fast and ema_fast > ema_slow and discount_zone and rsi < 50
+
+// SELL CONDITIONS
+sell_condition_1 = liquidity_grab_up and premium_zone and bearish_structure
+sell_condition_2 = bear_ob_valid and close >= bear_ob_low and close <= bear_ob_high and ema_bearish
+sell_condition_3 = bearish_fvg and premium_zone and rsi_overbought and high_volume
+sell_condition_4 = structure_break and bearish_structure and premium_zone and (nyKillZone or londonKillZone)
+sell_condition_5 = close < ema_fast and ema_fast < ema_slow and premium_zone and rsi > 50
+
+buy_strength = (buy_condition_1 ? 0.3 : 0) + (buy_condition_2 ? 0.25 : 0) + (buy_condition_3 ? 0.2 : 0) + (buy_condition_4 ? 0.15 : 0) + (buy_condition_5 ? 0.1 : 0)
+sell_strength = (sell_condition_1 ? 0.3 : 0) + (sell_condition_2 ? 0.25 : 0) + (sell_condition_3 ? 0.2 : 0) + (sell_condition_4 ? 0.15 : 0) + (sell_condition_5 ? 0.1 : 0)
+
+var bool prev_buy_signal = false
+var bool prev_sell_signal = false
+
+buy_signal = buy_strength >= signal_sensitivity and not prev_sell_signal
+sell_signal = sell_strength >= signal_sensitivity and not prev_buy_signal
+
+if buy_signal
+    prev_buy_signal := true
+    prev_sell_signal := false
+else if sell_signal
+    prev_buy_signal := false
+    prev_sell_signal := true
+
+// === STOP LOSS & TARGETS === //
+var float buy_stop_loss = na
+var float sell_stop_loss = na
+var float buy_entry_price = na
+var float sell_entry_price = na
+atr_stop_distance = atr_value * atr_multiplier
+
+if buy_signal
+    buy_entry_price := close
+    atr_based_stop = close - atr_stop_distance
+    structure_based_stop = math.min(ssl_level - atr_value * 0.5, ta.lowest(low, 10) - atr_value * 0.2)
+    buy_stop_loss := math.max(atr_based_stop, structure_based_stop)
+
+if sell_signal
+    sell_entry_price := close
+    atr_based_stop = close + atr_stop_distance
+    structure_based_stop = math.max(bsl_level + atr_value * 0.5, ta.highest(high, 10) + atr_value * 0.2)
+    sell_stop_loss := math.min(atr_based_stop, structure_based_stop)
+
+var float buy_target_1 = na
+var float buy_target_2 = na 
+var float buy_target_3 = na
+var float sell_target_1 = na
+var float sell_target_2 = na
+var float sell_target_3 = na
+
+if buy_signal and not na(buy_stop_loss)
+    risk_amount = buy_entry_price - buy_stop_loss
+    buy_target_1 := buy_entry_price + (risk_amount * 1.5)
+    liquidity_target = bsl_level + (atr_value * 0.5)
+    rr_target = buy_entry_price + (risk_amount * 2.5)
+    buy_target_2 := math.max(liquidity_target, rr_target)
+    structure_target = range_high + (atr_value * 1.0)
+    fib_target = equilibrium + ((range_high - equilibrium) * 1.618)
+    major_rr_target = buy_entry_price + (risk_amount * 4.0)
+    buy_target_3 := math.max(math.max(structure_target, fib_target), major_rr_target)
+
+if sell_signal and not na(sell_stop_loss)
+    risk_amount = sell_stop_loss - sell_entry_price
+    sell_target_1 := sell_entry_price - (risk_amount * 1.5)
+    liquidity_target = ssl_level - (atr_value * 0.5)
+    rr_target = sell_entry_price - (risk_amount * 2.5)
+    sell_target_2 := math.min(liquidity_target, rr_target)
+    structure_target = range_low - (atr_value * 1.0)
+    fib_target = equilibrium - ((equilibrium - range_low) * 1.618)
+    major_rr_target = sell_entry_price - (risk_amount * 4.0)
+    sell_target_3 := math.min(math.min(structure_target, fib_target), major_rr_target)
+
+var string expected_target = ""
+var float primary_target = na
+
+if buy_signal
+    if buy_strength >= 0.8 and (nyKillZone or londonKillZone) and high_volume
+        expected_target := "TARGET 3 (Extended)"
+        primary_target := buy_target_3
+    else if buy_strength >= 0.6 and bullish_structure and discount_zone
+        expected_target := "TARGET 2 (Standard)" 
+        primary_target := buy_target_2
+    else
+        expected_target := "TARGET 1 (Conservative)"
+        primary_target := buy_target_1
+
+if sell_signal
+    if sell_strength >= 0.8 and (nyKillZone or londonKillZone) and high_volume
+        expected_target := "TARGET 3 (Extended)"
+        primary_target := sell_target_3
+    else if sell_strength >= 0.6 and bearish_structure and premium_zone
+        expected_target := "TARGET 2 (Standard)"
+        primary_target := sell_target_2
+    else
+        expected_target := "TARGET 1 (Conservative)"
+        primary_target := sell_target_1
+
+// === CANDLE COLORING === //
+var color candle_color = neutral_color
+hammer = (close > open) and ((open - low) > 2 * (close - open)) and ((high - close) <= (close - open))
+shooting_star = (close < open) and ((high - open) > 2 * (open - close)) and ((close - low) <= (open - close))
+doji = math.abs(close - open) <= (high - low) * 0.1
+engulfing_bull = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+engulfing_bear = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+reversal_candle = hammer or shooting_star or doji or engulfing_bull or engulfing_bear
+
+if buy_signal
+    candle_color := signal_color_buy
+else if sell_signal
+    candle_color := signal_color_sell
+else if reversal_candle
+    candle_color := color.black
+else if buy_strength > 0.3
+    candle_color := color.new(bullish_color, 50)
+else if sell_strength > 0.3
+    candle_color := color.new(bearish_color, 50)
+else if bullish_structure and discount_zone
+    candle_color := color.new(bullish_color, 50)
+else if bearish_structure and premium_zone
+    candle_color := color.new(bearish_color, 50)
+else
+    candle_color := neutral_color
+
+// === PLOTTING === //
+plotcandle(open, high, low, close, color=candle_color, wickcolor=border_color, bordercolor=candle_color, title="SMC ICT Candles")
+
+// EMAs
+plot(ema_fast, color=ema_fast_color, linewidth=1, title="EMA 9")
+plot(ema_slow, color=ema_slow_color, linewidth=1, title="EMA 21")
+plot(ema_trend, color=ema_trend_color, linewidth=2, title="EMA 50")
+
+// Equilibrium line
+plot(show_structure ? equilibrium : na, color=highlight_color, linewidth=1, title="Equilibrium")
+
+// Premium/Discount zones
+bgcolor(show_structure and premium_zone ? zone_color_bear : show_structure and discount_zone ? zone_color_bull : na, title="Premium/Discount Zone")
+
+// Kill Zones
+bgcolor(nyKillZone ? color.new(color.blue, 90) : na, title="NY Kill Zone")
+bgcolor(londonKillZone ? color.new(color.purple, 90) : na, title="London Kill Zone")
+bgcolor(asianKillZone ? color.new(color.orange, 90) : na, title="Asian Kill Zone")
+
+// Liquidity levels
+plot(show_liquidity ? bsl_level : na, color=color.new(bearish_color, 30), linewidth=2, title="Buy Side Liquidity", style=plot.style_line)
+plot(show_liquidity ? ssl_level : na, color=color.new(bullish_color, 30), linewidth=2, title="Sell Side Liquidity", style=plot.style_line)
+
+// Order Blocks
+bgcolor(show_ob and bull_ob_valid and close >= bull_ob_low and close <= bull_ob_high ? ob_color_bull : na, title="Bullish Order Block")
+bgcolor(show_ob and bear_ob_valid and close >= bear_ob_low and close <= bear_ob_high ? ob_color_bear : na, title="Bearish Order Block")
+
+// Buy/Sell signals
+plotshape(show_signals and buy_signal, title="BUY Signal", location=location.belowbar, style=shape.labelup, size=size.normal, color=signal_color_buy, textcolor=text_color, text="BUY")
+plotshape(show_signals and sell_signal, title="SELL Signal", location=location.abovebar, style=shape.labeldown, size=size.normal, color=signal_color_sell, textcolor=text_color, text="SELL")
+
+plotshape(show_signals and buy_strength > 0.4 and not buy_signal, title="Strong Buy Setup", location=location.belowbar, style=shape.triangleup, size=size.tiny, color=bullish_color)
+plotshape(show_signals and sell_strength > 0.4 and not sell_signal, title="Strong Sell Setup", location=location.abovebar, style=shape.triangledown, size=size.tiny, color=bearish_color)
+
+// Stop Loss & Targets
+plot(show_signals and not na(buy_stop_loss) and prev_buy_signal ? buy_stop_loss : na, color=color.new(bearish_color, 0), linewidth=2, style=plot.style_stepline, title="Buy Stop Loss")
+plot(show_signals and not na(sell_stop_loss) and prev_sell_signal ? sell_stop_loss : na, color=color.new(bearish_color, 0), linewidth=2, style=plot.style_stepline, title="Sell Stop Loss")
+
+plot(show_signals and not na(buy_target_1) and prev_buy_signal ? buy_target_1 : na, color=color.new(signal_color_buy, 0), linewidth=2, style=plot.style_stepline, title="Buy Target 1")
+plot(show_signals and not na(sell_target_1) and prev_sell_signal ? sell_target_1 : na, color=color.new(signal_color_buy, 0), linewidth=2, style=plot.style_stepline, title="Sell Target 1")
+
+plot(show_signals and not na(buy_target_2) and prev_buy_signal ? buy_target_2 : na, color=color.new(ema_slow_color, 0), linewidth=2, style=plot.style_stepline, title="Buy Target 2")
+plot(show_signals and not na(sell_target_2) and prev_sell_signal ? sell_target_2 : na, color=color.new(ema_slow_color, 0), linewidth=2, style=plot.style_stepline, title="Sell Target 2")
+
+plot(show_signals and not na(buy_target_3) and prev_buy_signal ? buy_target_3 : na, color=color.new(signal_color_sell, 0), linewidth=2, style=plot.style_stepline, title="Buy Target 3")
+plot(show_signals and not na(sell_target_3) and prev_sell_signal ? sell_target_3 : na, color=color.new(signal_color_sell, 0), linewidth=2, style=plot.style_stepline, title="Sell Target 3")
+
+plot(show_signals and not na(primary_target) and (prev_buy_signal or prev_sell_signal) ? primary_target : na, color=color.new(highlight_color, 0), linewidth=4, style=plot.style_line, title="Primary Target")
+
+plot(show_signals and not na(buy_entry_price) and prev_buy_signal ? buy_entry_price : na, color=color.new(ema_fast_color, 50), linewidth=1, style=plot.style_circles, title="Buy Entry")
+plot(show_signals and not na(sell_entry_price) and prev_sell_signal ? sell_entry_price : na, color=color.new(ema_fast_color, 50), linewidth=1, style=plot.style_circles, title="Sell Entry")
+
+// Labels
+if show_signals and buy_signal and not na(buy_stop_loss)
+    risk = buy_entry_price - buy_stop_loss
+    target1_rr = (buy_target_1 - buy_entry_price) / risk
+    target2_rr = (buy_target_2 - buy_entry_price) / risk  
+    target3_rr = (buy_target_3 - buy_entry_price) / risk
+    
+    label.new(bar_index, high + atr_value * 2, 
+              "🎯 " + expected_target + "\n" +
+              "T1: " + str.tostring(buy_target_1, format.mintick) + " (" + str.tostring(math.round(target1_rr, 1)) + ":1)\n" +
+              "T2: " + str.tostring(buy_target_2, format.mintick) + " (" + str.tostring(math.round(target2_rr, 1)) + ":1)\n" +
+              "T3: " + str.tostring(buy_target_3, format.mintick) + " (" + str.tostring(math.round(target3_rr, 1)) + ":1)\n" +
+              "SL: " + str.tostring(buy_stop_loss, format.mintick), 
+              color=color.new(signal_color_buy, 80), textcolor=text_color, style=label.style_label_down, size=size.normal)
+
+if show_signals and sell_signal and not na(sell_stop_loss)
+    risk = sell_stop_loss - sell_entry_price
+    target1_rr = (sell_entry_price - sell_target_1) / risk
+    target2_rr = (sell_entry_price - sell_target_2) / risk
+    target3_rr = (sell_entry_price - sell_target_3) / risk
+    
+    label.new(bar_index, low - atr_value * 2, 
+              "🎯 " + expected_target + "\n" +
+              "T1: " + str.tostring(sell_target_1, format.mintick) + " (" + str.tostring(math.round(target1_rr, 1)) + ":1)\n" +
+              "T2: " + str.tostring(sell_target_2, format.mintick) + " (" + str.tostring(math.round(target2_rr, 1)) + ":1)\n" +
+              "T3: " + str.tostring(sell_target_3, format.mintick) + " (" + str.tostring(math.round(target3_rr, 1)) + ":1)\n" +
+              "SL: " + str.tostring(sell_stop_loss, format.mintick), 
+              color=color.new(signal_color_sell, 80), textcolor=text_color, style=label.style_label_up, size=size.normal)
+
+// Kill Zone Label
+var label killZoneLabel = label.new(na, na, "", style=label.style_label_left, size=size.normal)
+if barstate.islast
+    string currentZone = "No Kill Zone"
+    color zoneColor = color.gray
+    
+    if nyKillZone
+        currentZone := "NY Kill Zone (7AM-10AM EST)"
+        zoneColor := color.blue
+    else if londonKillZone
+        currentZone := "London Kill Zone (2AM-5AM EST)"
+        zoneColor := color.purple
+    else if asianKillZone
+        currentZone := "Asian Kill Zone (8PM-2AM EST)"
+        zoneColor := color.orange
+    
+    label.set_xy(killZoneLabel, bar_index, high)
+    label.set_text(killZoneLabel, "Active: " + currentZone)
+    label.set_color(killZoneLabel, zoneColor)
+    label.set_textcolor(killZoneLabel, color.white)
+
+// Information Table
+if barstate.islast
+    var table info_table = table.new(position.top_right, 3, 12, bgcolor=bg_color, border_width=1, border_color=border_color)
+    
+    // Headers
+    table.cell(info_table, 0, 0, "Signal", text_color=text_color, bgcolor=color.new(border_color, 50), text_size=size.small)
+    table.cell(info_table, 1, 0, "Color", text_color=text_color, bgcolor=color.new(border_color, 50), text_size=size.small)
+    table.cell(info_table, 2, 0, "Value", text_color=text_color, bgcolor=color.new(border_color, 50), text_size=size.small)
+    
+    // Signal types
+    table.cell(info_table, 0, 1, "BUY", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 1, "●", text_color=signal_color_buy, text_size=size.large)
+    table.cell(info_table, 2, 1, str.tostring(math.round(buy_strength * 100)) + "%", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 2, "SELL", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 2, "●", text_color=signal_color_sell, text_size=size.large)
+    table.cell(info_table, 2, 2, str.tostring(math.round(sell_strength * 100)) + "%", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 3, "Expected", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 3, "🎯", text_color=highlight_color, text_size=size.large)
+    table.cell(info_table, 2, 3, expected_target != "" ? expected_target : "No Target", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 4, "ATR", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 4, "●", text_color=ema_fast_color, text_size=size.large)
+    table.cell(info_table, 2, 4, str.tostring(atr_value, format.mintick), text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 5, "Reversal", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 5, "●", text_color=color.black, text_size=size.large)
+    table.cell(info_table, 2, 5, reversal_candle ? "Yes" : "No", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 6, "Structure", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 6, "●", text_color=bullish_structure ? bullish_color : bearish_structure ? bearish_color : neutral_color, text_size=size.large)
+    table.cell(info_table, 2, 6, bullish_structure ? "Bull" : bearish_structure ? "Bear" : "Neutral", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 7, "Zone", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 7, "●", text_color=premium_zone ? bearish_color : discount_zone ? bullish_color : neutral_color, text_size=size.large)
+    table.cell(info_table, 2, 7, premium_zone ? "Premium" : discount_zone ? "Discount" : "Equilibrium", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 8, "Kill Zone", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 8, "●", text_color=(nyKillZone or londonKillZone) ? highlight_color : neutral_color, text_size=size.large)
+    table.cell(info_table, 2, 8, nyKillZone ? "NY" : londonKillZone ? "London" : asianKillZone ? "Asian" : "None", text_color=text_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 9, "RSI", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 9, "●", text_color=rsi_overbought ? bearish_color : rsi_oversold ? bullish_color : neutral_color, text_size=size.large)
+    table.cell(info_table, 2, 9, str.tostring(math.round(rsi)), text_color=text_color, text_size=size.small)
+    
+    current_sl = prev_buy_signal and not na(buy_stop_loss) ? str.tostring(buy_stop_loss, format.mintick) : prev_sell_signal and not na(sell_stop_loss) ? str.tostring(sell_stop_loss, format.mintick) : "N/A"
+    table.cell(info_table, 0, 10, "Stop Loss", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 10, "●", text_color=bearish_color, text_size=size.large)
+    table.cell(info_table, 2, 10, current_sl, text_color=text_color, text_size=size.small)
+    
+    current_target = (prev_buy_signal or prev_sell_signal) and not na(primary_target) ? str.tostring(primary_target, format.mintick) : "N/A"
+    table.cell(info_table, 0, 11, "Primary TP", text_color=text_color, text_size=size.small)
+    table.cell(info_table, 1, 11, "●", text_color=highlight_color, text_size=size.large)
+    table.cell(info_table, 2, 11, current_target, text_color=text_color, text_size=size.small)
+
+// Alerts
+alertcondition(buy_signal, "BUY SIGNAL", "Strong BUY signal detected - Multiple SMC/ICT confirmations")
+alertcondition(sell_signal, "SELL SIGNAL", "Strong SELL signal detected - Multiple SMC/ICT confirmations")
+alertcondition(liquidity_grab_up, "Liquidity Grab UP", "Buy-side liquidity grabbed - Potential reversal")
+alertcondition(liquidity_grab_down, "Liquidity Grab DOWN", "Sell-side liquidity grabbed - Potential reversal")
+alertcondition(structure_break, "Structure Break", "Market structure break detected")

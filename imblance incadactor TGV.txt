@@ -1,0 +1,264 @@
+//@version=5
+indicator("Enhanced Imbalance Detector with Trend Reversal", overlay=true, max_boxes_count=500)
+
+// Input parameters
+showBullishFVG = input.bool(true, "Show Bullish Imbalances", group="Display Settings")
+showBearishFVG = input.bool(true, "Show Bearish Imbalances", group="Display Settings")
+showSignals = input.bool(true, "Show Buy/Sell Signals", group="Display Settings")
+showReversalSignals = input.bool(true, "Show Trend Reversal Signals", group="Display Settings")
+fvgExtend = input.int(20, "Extend Imbalance Lines", minval=1, maxval=100, group="Display Settings")
+
+// Imbalance Classification Parameters
+minImbalanceSize = input.float(0.0001, "Minimum Imbalance Size", minval=0.0001, step=0.0001, group="Imbalance Classification")
+majorImbalanceMultiplier = input.float(3.0, "Major Imbalance Multiplier", minval=1.5, maxval=10.0, step=0.5, group="Imbalance Classification")
+atrPeriod = input.int(14, "ATR Period for Dynamic Sizing", minval=5, maxval=50, group="Imbalance Classification")
+useATRBasedSizing = input.bool(true, "Use ATR for Dynamic Imbalance Sizing", group="Imbalance Classification")
+
+// Impulse candle detection parameters
+impulseMinSize = input.float(1.5, "Impulse Candle Size Multiplier", minval=1.0, maxval=3.0, step=0.1, group="Impulse Candle Settings")
+
+// Trend Reversal Parameters
+reversalSensitivity = input.int(3, "Reversal Sensitivity", minval=1, maxval=5, group="Trend Reversal Settings")
+showDivergence = input.bool(true, "Show Divergence Signals", group="Trend Reversal Settings")
+
+// Colors for Major Imbalances
+majorBullishColor = input.color(color.new(color.lime, 70), "Major Bullish Imbalance Color", group="Major Imbalance Colors")
+majorBearishColor = input.color(color.new(color.red, 70), "Major Bearish Imbalance Color", group="Major Imbalance Colors")
+
+// Colors for Minor Imbalances
+minorBullishColor = input.color(color.new(color.green, 85), "Minor Bullish Imbalance Color", group="Minor Imbalance Colors")
+minorBearishColor = input.color(color.new(color.orange, 85), "Minor Bearish Imbalance Color", group="Minor Imbalance Colors")
+
+// Signal Colors
+buyColor = input.color(color.lime, "Buy Signal Color", group="Signal Colors")
+sellColor = input.color(color.red, "Sell Signal Color", group="Signal Colors")
+majorBuyColor = input.color(color.yellow, "Major Buy Signal Color", group="Signal Colors")
+majorSellColor = input.color(color.fuchsia, "Major Sell Signal Color", group="Signal Colors")
+
+// Reversal Signal Colors
+bullishReversalColor = input.color(color.teal, "Bullish Reversal Color", group="Reversal Colors")
+bearishReversalColor = input.color(color.purple, "Bearish Reversal Color", group="Reversal Colors")
+divergenceColor = input.color(color.orange, "Divergence Color", group="Reversal Colors")
+
+// Market structure parameters
+swingLength = input.int(5, "Swing Length for Market Structure", minval=3, maxval=20, group="Market Structure")
+
+// Calculate ATR for dynamic imbalance sizing
+atr = ta.atr(atrPeriod)
+
+// Function to detect swing highs and lows
+isSwingHigh(len) => ta.pivothigh(high, len, len)
+isSwingLow(len) => ta.pivotlow(low, len, len)
+
+// Enhanced Imbalance Detection with Size Classification
+bullishFVG = low > high[2]
+bearishFVG = high < low[2]
+
+// Calculate imbalance sizes
+bullishImbalanceSize = bullishFVG ? (low - high[2]) : 0.0
+bearishImbalanceSize = bearishFVG ? (low[2] - high) : 0.0
+
+// Determine threshold for major imbalances
+majorThreshold = useATRBasedSizing ? atr * 0.3 : minImbalanceSize * majorImbalanceMultiplier
+
+// Detect impulse candles (strong momentum candles)
+isBullishImpulse = (close - open) > (ta.atr(14) * impulseMinSize) and close > open
+isBearishImpulse = (open - close) > (ta.atr(14) * impulseMinSize) and close < open
+
+// Only consider imbalances that occur right before impulse candles
+validBullishImbalance = bullishFVG and isBullishImpulse[1]
+validBearishImbalance = bearishFVG and isBearishImpulse[1]
+
+// Classify imbalances as major or minor (only valid ones before impulse)
+isMajorBullish = validBullishImbalance and bullishImbalanceSize >= majorThreshold and bullishImbalanceSize > minImbalanceSize
+isMinorBullish = validBullishImbalance and bullishImbalanceSize < majorThreshold and bullishImbalanceSize > minImbalanceSize
+
+isMajorBearish = validBearishImbalance and bearishImbalanceSize >= majorThreshold and bearishImbalanceSize > minImbalanceSize
+isMinorBearish = validBearishImbalance and bearishImbalanceSize < majorThreshold and bearishImbalanceSize > minImbalanceSize
+
+// Variables to track market structure
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var float prevSwingHigh = na
+var float prevSwingLow = na
+var bool uptrend = na
+var int trendDuration = 0
+
+// Update swing points
+swingHigh = isSwingHigh(swingLength)
+swingLow = isSwingLow(swingLength)
+
+if not na(swingHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := swingHigh
+    trendDuration := trendDuration + 1
+
+if not na(swingLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := swingLow
+    trendDuration := trendDuration + 1
+
+// Determine trend based on market structure
+if not na(lastSwingHigh) and not na(lastSwingLow)
+    if close > lastSwingHigh
+        uptrend := true
+        trendDuration := trendDuration + 1
+    else if close < lastSwingLow
+        uptrend := false
+        trendDuration := trendDuration + 1
+
+// TREND REVERSAL DETECTION LOGIC
+// 1. Trend Exhaustion (Extended trend duration)
+isTrendExhausted = trendDuration > 20 * reversalSensitivity
+
+// 2. Hidden Divergence (Trend continuation pattern)
+rsi = ta.rsi(close, 14)
+rsiHigh = ta.highest(rsi, 10)
+rsiLow = ta.lowest(rsi, 10)
+
+bullishHiddenDivergence = low > low[1] and rsiLow < rsiLow[1] and uptrend
+bearishHiddenDivergence = high < high[1] and rsiHigh > rsiHigh[1] and not uptrend
+
+// 3. Double Top/Bottom patterns
+doubleTop = not na(lastSwingHigh) and not na(prevSwingHigh) and math.abs(lastSwingHigh - prevSwingHigh) < atr * 0.1 and not uptrend
+doubleBottom = not na(lastSwingLow) and not na(prevSwingLow) and math.abs(lastSwingLow - prevSwingLow) < atr * 0.1 and uptrend
+
+// 4. Break of Market Structure (BOS)
+bosBullish = low < lastSwingLow and close > lastSwingHigh and not uptrend
+bosBearish = high > lastSwingHigh and close < lastSwingLow and uptrend
+
+// 5. Volume surge at potential reversal points
+volumeSurge = volume > ta.sma(volume, 20) * 2.5
+
+// Composite Reversal Signals
+potentialBullishReversal = (isTrendExhausted and not uptrend) or doubleBottom or bosBullish or (bearishHiddenDivergence and volumeSurge)
+potentialBearishReversal = (isTrendExhausted and uptrend) or doubleTop or bosBearish or (bullishHiddenDivergence and volumeSurge)
+
+// Generate buy/sell signals based on imbalances and market structure
+minorBuySignal = isMinorBullish and uptrend and not barstate.isconfirmed
+majorBuySignal = isMajorBullish and uptrend and not barstate.isconfirmed
+
+minorSellSignal = isMinorBearish and not uptrend and not barstate.isconfirmed
+majorSellSignal = isMajorBearish and not uptrend and not barstate.isconfirmed
+
+// Generate reversal signals
+bullishReversalSignal = potentialBullishReversal and showReversalSignals and not barstate.isconfirmed
+bearishReversalSignal = potentialBearishReversal and showReversalSignals and not barstate.isconfirmed
+
+// Draw Major Imbalance zones
+if isMajorBullish and showBullishFVG and uptrend
+    box.new(bar_index - 2, high[2], bar_index + fvgExtend, low, 
+             border_color=color.new(majorBullishColor, 30), 
+             bgcolor=majorBullishColor, 
+             text="MAJOR Bullish", 
+             text_color=color.white, 
+             text_size=size.normal)
+
+if isMajorBearish and showBearishFVG and not uptrend
+    box.new(bar_index - 2, low[2], bar_index + fvgExtend, high, 
+             border_color=color.new(majorBearishColor, 30), 
+             bgcolor=majorBearishColor, 
+             text="MAJOR Bearish", 
+             text_color=color.white, 
+             text_size=size.normal)
+
+// Draw Minor Imbalance zones
+if isMinorBullish and showBullishFVG and uptrend
+    box.new(bar_index - 2, high[2], bar_index + fvgExtend, low, 
+             border_color=color.new(minorBullishColor, 40), 
+             bgcolor=minorBullishColor, 
+             text="minor bullish", 
+             text_color=color.white, 
+             text_size=size.small)
+
+if isMinorBearish and showBearishFVG and not uptrend
+    box.new(bar_index - 2, low[2], bar_index + fvgExtend, high, 
+             border_color=color.new(minorBearishColor, 40), 
+             bgcolor=minorBearishColor, 
+             text="minor bearish", 
+             text_color=color.white, 
+             text_size=size.small)
+
+// Plot buy/sell signals with different colors for major vs minor
+plotshape(minorBuySignal and showSignals, title="Minor Buy", location=location.belowbar, style=shape.labelup, color=buyColor, text="BUY", textcolor=color.white, size=size.small)
+plotshape(majorBuySignal and showSignals, title="Major Buy", location=location.belowbar, style=shape.labelup, color=majorBuyColor, text="MAJOR BUY", textcolor=color.black, size=size.normal)
+
+plotshape(minorSellSignal and showSignals, title="Minor Sell", location=location.abovebar, style=shape.labeldown, color=sellColor, text="SELL", textcolor=color.white, size=size.small)
+plotshape(majorSellSignal and showSignals, title="Major Sell", location=location.abovebar, style=shape.labeldown, color=majorSellColor, text="MAJOR SELL", textcolor=color.white, size=size.normal)
+
+// Plot Trend Reversal Signals
+plotshape(bullishReversalSignal, title="Bullish Reversal", location=location.belowbar, style=shape.triangleup, color=bullishReversalColor, size=size.normal, text="REV↑", textcolor=color.white)
+plotshape(bearishReversalSignal, title="Bearish Reversal", location=location.abovebar, style=shape.triangledown, color=bearishReversalColor, size=size.normal, text="REV↓", textcolor=color.white)
+
+// Plot Divergence Signals
+plotshape(bullishHiddenDivergence and showDivergence and showReversalSignals, title="Bullish Divergence", location=location.belowbar, style=shape.circle, color=divergenceColor, size=size.tiny)
+plotshape(bearishHiddenDivergence and showDivergence and showReversalSignals, title="Bearish Divergence", location=location.abovebar, style=shape.circle, color=divergenceColor, size=size.tiny)
+
+// Volume confirmation
+volConfirmation = volume > ta.sma(volume, 20) * 1.5
+
+// Enhanced signals with volume confirmation
+strongMinorBuy = minorBuySignal and volConfirmation and uptrend
+strongMajorBuy = majorBuySignal and volConfirmation and uptrend
+strongMinorSell = minorSellSignal and volConfirmation and not uptrend
+strongMajorSell = majorSellSignal and volConfirmation and not uptrend
+
+plotshape(strongMinorBuy and showSignals, title="Strong Minor Buy", location=location.belowbar, style=shape.triangleup, color=color.aqua, size=size.tiny)
+plotshape(strongMajorBuy and showSignals, title="Strong Major Buy", location=location.belowbar, style=shape.triangleup, color=color.yellow, size=size.small)
+plotshape(strongMinorSell and showSignals, title="Strong Minor Sell", location=location.abovebar, style=shape.triangledown, color=color.orange, size=size.tiny)
+plotshape(strongMajorSell and showSignals, title="Strong Major Sell", location=location.abovebar, style=shape.triangledown, color=color.fuchsia, size=size.small)
+
+// Alert conditions
+alertcondition(minorBuySignal and uptrend, title="Minor Buy Alert", message="Minor bullish imbalance detected before impulse candle in uptrend")
+alertcondition(majorBuySignal and uptrend, title="Major Buy Alert", message="MAJOR bullish imbalance detected before impulse candle in uptrend - Strong buy opportunity")
+alertcondition(minorSellSignal and not uptrend, title="Minor Sell Alert", message="Minor bearish imbalance detected before impulse candle in downtrend")
+alertcondition(majorSellSignal and not uptrend, title="Major Sell Alert", message="MAJOR bearish imbalance detected before impulse candle in downtrend - Strong sell opportunity")
+alertcondition(bullishReversalSignal, title="Bullish Reversal Alert", message="Potential bullish trend reversal detected")
+alertcondition(bearishReversalSignal, title="Bearish Reversal Alert", message="Potential bearish trend reversal detected")
+
+// Enhanced table with imbalance information
+if barstate.islast
+    var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.white, border_width=1)
+    
+    table.cell(infoTable, 0, 0, "Market Structure", text_color=color.black, bgcolor=color.gray)
+    trendText = na(uptrend) ? "Undefined" : uptrend ? "Uptrend" : "Downtrend"
+    trendColor = na(uptrend) ? color.yellow : uptrend ? color.green : color.red
+    table.cell(infoTable, 1, 0, trendText, text_color=color.black, bgcolor=trendColor)
+    
+    table.cell(infoTable, 0, 1, "Trend Duration", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 1, str.tostring(trendDuration) + " bars", text_color=color.black)
+    
+    table.cell(infoTable, 0, 2, "Current Price", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 2, str.tostring(close, "#.####"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 3, "ATR", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 3, str.tostring(atr, "#.####"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 4, "Major Threshold", text_color=color.black, bgcolor=color.gray)
+    table.cell(infoTable, 1, 4, str.tostring(majorThreshold, "#.####"), text_color=color.black)
+    
+    table.cell(infoTable, 0, 5, "Volume Status", text_color=color.black, bgcolor=color.gray)
+    volText = volConfirmation ? "High Volume" : "Normal Volume"
+    volColor = volConfirmation ? color.green : color.yellow
+    table.cell(infoTable, 1, 5, volText, text_color=color.black, bgcolor=volColor)
+    
+    table.cell(infoTable, 0, 6, "Last Imbalance", text_color=color.black, bgcolor=color.gray)
+    lastImbalanceText = isMajorBullish and uptrend ? "Major Bullish" : isMajorBearish and not uptrend ? "Major Bearish" : isMinorBullish and uptrend ? "Minor Bullish" : isMinorBearish and not uptrend ? "Minor Bearish" : "None"
+    lastImbalanceColor = (isMajorBullish and uptrend or isMinorBullish and uptrend) ? color.green : (isMajorBearish and not uptrend or isMinorBearish and not uptrend) ? color.red : color.gray
+    table.cell(infoTable, 1, 6, lastImbalanceText, text_color=color.black, bgcolor=lastImbalanceColor)
+    
+    table.cell(infoTable, 0, 7, "Signal Strength", text_color=color.black, bgcolor=color.gray)
+    signalStrength = (majorBuySignal and uptrend) or (majorSellSignal and not uptrend) ? "MAJOR" : (minorBuySignal and uptrend) or (minorSellSignal and not uptrend) ? "Minor" : "No Signal"
+    signalColor = (majorBuySignal and uptrend) or (majorSellSignal and not uptrend) ? color.yellow : (minorBuySignal and uptrend) or (minorSellSignal and not uptrend) ? color.orange : color.gray
+    table.cell(infoTable, 1, 7, signalStrength, text_color=color.black, bgcolor=signalColor)
+    
+    table.cell(infoTable, 0, 8, "Reversal Potential", text_color=color.black, bgcolor=color.gray)
+    reversalPotential = potentialBullishReversal ? "Bullish Reversal" : potentialBearishReversal ? "Bearish Reversal" : "No Reversal"
+    reversalColor = potentialBullishReversal ? color.teal : potentialBearishReversal ? color.purple : color.gray
+    table.cell(infoTable, 1, 8, reversalPotential, text_color=color.black, bgcolor=reversalColor)
+    
+    table.cell(infoTable, 0, 9, "Recommendation", text_color=color.black, bgcolor=color.gray)
+    recommendation = majorBuySignal and uptrend ? "STRONG BUY" : majorSellSignal and not uptrend ? "STRONG SELL" : 
+                   minorBuySignal and uptrend ? "Buy" : minorSellSignal and not uptrend ? "Sell" :
+                   potentialBullishReversal ? "Watch for LONG" : potentialBearishReversal ? "Watch for SHORT" : "WAIT"
+    table.cell(infoTable, 1, 9, recommendation, text_color=color.black)

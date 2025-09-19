@@ -1,0 +1,150 @@
+//@version=5
+indicator("SL/TP Strategy with Alerts + Risk Table + EMA Entry + Structure + Kill Zone", overlay=true)
+
+// === INPUTS === //
+useSupertrend = input.bool(true, "Use Supertrend Entry")
+atrLength = input.int(14, "ATR Length")
+slMultiplier = input.float(1.5, "SL Multiplier", step=0.1)
+tpMultiplier = input.float(50.0, "TP Multiplier", step=1)
+accountSize = input.float(10000, "Account Size ($)", step=100)
+riskPerTrade = input.float(1.0, "Risk per Trade (%)", step=0.1)
+contractSize = input.float(1, "Contract/Position Size", step=0.1)
+
+// === CALCULATIONS === //
+atr = ta.atr(atrLength)
+
+// === ENTRY LOGIC === //
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+supertrendFactor = 3.0
+[supertrend, dir] = ta.supertrend(supertrendFactor, atrLength)
+
+buySignal = useSupertrend ? ta.crossover(close, supertrend) : ta.crossover(emaFast, emaSlow)
+sellSignal = useSupertrend ? ta.crossunder(close, supertrend) : ta.crossunder(emaFast, emaSlow)
+
+// === ENTRY, SL & TP === //
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+
+if (buySignal)
+    entryPrice := close
+    stopLoss := entryPrice - slMultiplier * atr
+    takeProfit := entryPrice + tpMultiplier * atr
+
+if (sellSignal)
+    entryPrice := close
+    stopLoss := entryPrice + slMultiplier * atr
+    takeProfit := entryPrice - tpMultiplier * atr
+
+// === PLOT SIGNALS === //
+plotshape(buySignal, title="Buy", location=location.belowbar, color=color.green, style=shape.labelup, text="Buy")
+plotshape(sellSignal, title="Sell", location=location.abovebar, color=color.red, style=shape.labeldown, text="Sell")
+plot(stopLoss, "SL", color=color.red, linewidth=2, style=plot.style_linebr)
+plot(takeProfit, "TP", color=color.green, linewidth=2, style=plot.style_linebr)
+
+if (buySignal)
+    label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+if (sellSignal)
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// === ALERTS === //
+longSLHit = (not na(stopLoss) and close <= stopLoss and close < entryPrice)
+longTPHit = (not na(takeProfit) and close >= takeProfit and close > entryPrice)
+shortSLHit = (not na(stopLoss) and close >= stopLoss and close > entryPrice)
+shortTPHit = (not na(takeProfit) and close <= takeProfit and close < entryPrice)
+
+alertcondition(longSLHit, title="Long SL Hit", message="Long Stop Loss hit!")
+alertcondition(longTPHit, title="Long TP Hit", message="Long Take Profit hit!")
+alertcondition(shortSLHit, title="Short SL Hit", message="Short Stop Loss hit!")
+alertcondition(shortTPHit, title="Short TP Hit", message="Short Take Profit hit!")
+
+// === RISK & POSITION SIZE === //
+riskDollar = accountSize * (riskPerTrade / 100)
+slDistance = math.abs(entryPrice - stopLoss)
+positionSize = slDistance > 0 ? riskDollar / slDistance : na
+leverage = (positionSize * close) / accountSize
+
+// === MARKET STRUCTURE & REVERSAL ZONE === //
+pivotHigh = ta.pivothigh(high, 5, 5)
+pivotLow = ta.pivotlow(low, 5, 5)
+
+var float lastHigh = na
+var float lastLow = na
+
+if not na(pivotHigh)
+    lastHigh := pivotHigh
+if not na(pivotLow)
+    lastLow := pivotLow
+
+structure = "Ranging"
+if lastHigh and lastLow
+    structure := close > lastHigh ? "Uptrend" :
+                 close < lastLow ? "Downtrend" : "Ranging"
+
+reversalZoneTop = ta.highest(high, 20)
+reversalZoneBottom = ta.lowest(low, 20)
+
+// === KILL ZONE LOGIC === //
+killZoneStart = timestamp("UTC", year, month, dayofmonth, 13, 0)  // 13:00 UTC = 8 AM EST
+killZoneEnd   = timestamp("UTC", year, month, dayofmonth, 16, 0)  // 16:00 UTC = 11 AM EST
+inKillZone = time >= killZoneStart and time < killZoneEnd
+
+bgcolor(inKillZone ? color.new(color.purple, 85) : na)
+
+// === INFO TABLE === //
+var table info = table.new(position.bottom_right, 3, 12, border_width=1)
+
+if bar_index == 10
+    table.cell(info, 0, 0, "Metric", bgcolor=color.gray, text_color=color.white)
+    table.cell(info, 1, 0, "Side", bgcolor=color.gray, text_color=color.white)
+    table.cell(info, 2, 0, "Value", bgcolor=color.gray, text_color=color.white)
+
+signalStr = buySignal ? "Buy" : sellSignal ? "Sell" : "-"
+signalColor = buySignal ? color.green : sellSignal ? color.red : color.gray
+
+table.cell(info, 0, 1, "Signal", text_color=color.white)
+table.cell(info, 1, 1, signalStr, text_color=signalColor)
+table.cell(info, 2, 1, str.tostring(entryPrice, format.mintick), text_color=color.white)
+
+// ✅ "ATR" renamed to "Range"
+table.cell(info, 0, 2, "Range", text_color=color.white)
+table.cell(info, 1, 2, "-", text_color=color.white)
+table.cell(info, 2, 2, str.tostring(atr, format.mintick), text_color=color.yellow)
+
+table.cell(info, 0, 3, "Stop Loss", text_color=color.white)
+table.cell(info, 1, 3, "-", text_color=color.red)
+table.cell(info, 2, 3, str.tostring(stopLoss, format.mintick), text_color=color.red)
+
+table.cell(info, 0, 4, "Take Profit", text_color=color.white)
+table.cell(info, 1, 4, "-", text_color=color.green)
+table.cell(info, 2, 4, str.tostring(takeProfit, format.mintick), text_color=color.green)
+
+table.cell(info, 0, 5, "Risk Amount", text_color=color.white)
+table.cell(info, 1, 5, str.tostring(riskPerTrade) + "%", text_color=color.orange)
+table.cell(info, 2, 5, "$" + str.tostring(riskDollar, format.mintick), text_color=color.orange)
+
+table.cell(info, 0, 6, "SL Distance", text_color=color.white)
+table.cell(info, 1, 6, "-", text_color=color.white)
+table.cell(info, 2, 6, str.tostring(slDistance, format.mintick), text_color=color.white)
+
+table.cell(info, 0, 7, "Position Size", text_color=color.white)
+table.cell(info, 1, 7, "Units", text_color=color.white)
+table.cell(info, 2, 7, str.tostring(positionSize, format.mintick), text_color=color.aqua)
+
+table.cell(info, 0, 8, "Leverage (Est.)", text_color=color.white)
+table.cell(info, 1, 8, "-", text_color=color.white)
+table.cell(info, 2, 8, str.tostring(leverage, format.mintick), text_color=color.teal)
+
+table.cell(info, 0, 9, "Market Structure", text_color=color.white)
+table.cell(info, 1, 9, "-", text_color=color.white)
+table.cell(info, 2, 9, structure, text_color=structure == "Uptrend" ? color.green : structure == "Downtrend" ? color.red : color.gray)
+
+table.cell(info, 0, 10, "Reversal Zone", text_color=color.white)
+table.cell(info, 1, 10, "Top/Bottom", text_color=color.white)
+table.cell(info, 2, 10, str.tostring(reversalZoneTop, format.mintick) + " / " + str.tostring(reversalZoneBottom, format.mintick), text_color=color.yellow)
+
+// ✅ Add Kill Zone Status to Table
+table.cell(info, 0, 11, "Kill Zone", text_color=color.white)
+table.cell(info, 1, 11, "-", text_color=color.white)
+table.cell(info, 2, 11, inKillZone ? "Yes" : "No", text_color=inKillZone ? color.green : color.gray)
