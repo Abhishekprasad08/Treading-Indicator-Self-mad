@@ -1,0 +1,432 @@
+//@version=5
+strategy("Advanced Sniper Strategy + Pattern Detector (TradingWithAbhishek) - Fixed", overlay=true, pyramiding=0, initial_capital=100000, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// ---------------- INPUTS ----------------
+emaFastLen = input.int(20, "Fast EMA", minval=1)
+emaSlowLen = input.int(50, "Slow EMA", minval=1)
+riskReward = input.float(3.0, "Risk Reward", minval=0.1, step=0.1)
+slPerc = input.float(0.4, "Stoploss %", minval=0.1, step=0.1)
+maxZones = input.int(3, "Max Zones", minval=1, maxval=10)
+leftBars = input.int(3, "Pivot Left Bars", minval=1)
+rightBars = input.int(3, "Pivot Right Bars", minval=1)
+liqLookback = input.int(5, "Liquidity Lookback", minval=3, maxval=20)
+atrLength = input.int(14, "ATR Length", minval=1, group="Trend Box")
+
+// Display options
+showSignals = input.bool(true, "Show Buy/Sell Signals", group="Display")
+showComponents = input.bool(true, "Show Component Signals", group="Display")
+showZones = input.bool(true, "Show Supply/Demand Zones", group="Display")
+showSLTP = input.bool(true, "Show SL/TP Levels", group="Display")
+showTrendBox = input.bool(true, "Show Trend Duration Box", group="Display")
+showPatternOnChart = input.bool(true, "Show Pattern Label on Chart", group="Display")
+
+// Trend / ADX settings
+lenADX = input.int(14, "ADX Length", minval=1, group="Trend Box")
+rsiLen = input.int(14, "RSI Length", group="Trend Box")
+smaRev = input.int(3, "Reversal Price SMA", group="Trend Box")
+useDailyEstimate = input.bool(true, "Use days estimate", group="Trend Box")
+
+// Pattern tuning
+patternLookback = input.int(60, "Pattern Lookback Bars", minval=20, maxval=500, group="Patterns")
+triangleSlopeThreshold = input.float(0.0006, "Triangle slope threshold (approx)", step=0.0001, group="Patterns")
+doubleTolerancePerc = input.float(0.8, "Double top/bottom tolerance (%)", step=0.1, group="Patterns")
+
+// Colors
+bullishBgColor = input.color(color.new(#00ff88, 75), "Bullish Box Color", group="Trend Box")
+bearishBgColor = input.color(color.new(#ff3366, 75), "Bearish Box Color", group="Trend Box")
+neutralBgColor = input.color(color.new(#ffaa00, 80), "Neutral Box Color", group="Trend Box")
+trendTextColor = input.color(color.new(#1a1a1a, 0), "Text Color", group="Trend Box")
+
+// ---------------- INDICATORS ----------------
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+trendUp = emaFast > emaSlow
+trendDown = emaFast < emaSlow
+
+// Manual ADX
+tr = math.max(high - low, math.max(math.abs(high - nz(close[1])), math.abs(low - nz(close[1]))))
+up = high - nz(high[1])
+down = nz(low[1]) - low
+plusDM  = (up > down and up > 0) ? up : 0.0
+minusDM = (down > up and down > 0) ? down : 0.0
+atr = ta.rma(tr, lenADX)
+smPlus = ta.rma(plusDM, lenADX)
+smMinus = ta.rma(minusDM, lenADX)
+plusDI  = atr == 0 ? 0.0 : 100 * (smPlus / atr)
+minusDI = atr == 0 ? 0.0 : 100 * (smMinus / atr)
+dx = (plusDI + minusDI) == 0 ? 0.0 : 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx = ta.rma(dx, lenADX)
+
+rsi = ta.rsi(close, rsiLen)
+smaPrice = ta.sma(close, smaRev)
+sma20 = ta.sma(close, 20)
+isUpTrend   = adx > 25 and ta.rising(rsi, 3) and close > sma20
+isDownTrend = adx > 25 and ta.falling(rsi, 3) and close < sma20
+
+// ---------------- LIQUIDITY SWEEP DETECTION ----------------
+var float lastLiqTop = na
+var float lastLiqBottom = na
+var float lastLiqRange = na
+var string lastLiqDir = "NONE"
+
+recentHigh = ta.highest(high, liqLookback)
+recentLow = ta.lowest(low, liqLookback)
+prevHigh = ta.highest(high, liqLookback)[liqLookback]
+prevLow = ta.lowest(low, liqLookback)[liqLookback]
+
+liqSweepUp = high >= recentHigh and high > prevHigh and close < open
+liqSweepDown = low <= recentLow and low < prevLow and close > open
+
+if liqSweepUp
+    lastLiqDir := "UP"
+    lastLiqTop := recentHigh
+    lastLiqBottom := prevLow
+    lastLiqRange := recentHigh - prevLow
+    
+if liqSweepDown
+    lastLiqDir := "DOWN"
+    lastLiqTop := prevHigh
+    lastLiqBottom := recentLow
+    lastLiqRange := prevHigh - recentLow
+
+// ---------------- PIVOTS & ZONES ----------------
+swingHigh = ta.pivothigh(high, leftBars, rightBars)
+swingLow  = ta.pivotlow(low, leftBars, rightBars)
+
+// Zone arrays
+var float[] demandTops = array.new_float()
+var float[] demandBottoms = array.new_float()
+var float[] supplyTops = array.new_float()
+var float[] supplyBottoms = array.new_float()
+
+if not na(swingLow)
+    lowPrice = low[rightBars]
+    bottomPrice = lowPrice * 0.999
+    array.unshift(demandTops, lowPrice)
+    array.unshift(demandBottoms, bottomPrice)
+    if array.size(demandTops) > maxZones
+        array.pop(demandTops)
+        array.pop(demandBottoms)
+
+if not na(swingHigh)
+    highPrice = high[rightBars]
+    topPrice = highPrice * 1.001
+    array.unshift(supplyTops, topPrice)
+    array.unshift(supplyBottoms, highPrice)
+    if array.size(supplyTops) > maxZones
+        array.pop(supplyTops)
+        array.pop(supplyBottoms)
+
+// Pivot lists for pattern detection
+var float[] highPivotsArr = array.new_float()
+var float[] lowPivotsArr  = array.new_float()
+maxPivotStore = 10
+if not na(swingHigh)
+    array.unshift(highPivotsArr, high[rightBars])
+    if array.size(highPivotsArr) > maxPivotStore
+        array.pop(highPivotsArr)
+if not na(swingLow)
+    array.unshift(lowPivotsArr, low[rightBars])
+    if array.size(lowPivotsArr) > maxPivotStore
+        array.pop(lowPivotsArr)
+
+// === CURRENT TIMEFRAME ATR ANALYSIS ===
+// Current timeframe ATR
+currentATR = ta.atr(atrLength)
+
+// Get timeframe string for display
+tf = timeframe.period
+tfDisplay = tf == "1" ? "1m" : tf == "5" ? "5m" : tf == "15" ? "15m" : tf == "30" ? "30m" : tf == "60" ? "1H" : tf == "240" ? "4H" : tf == "D" ? "1D" : tf
+
+// Calculate ATR used percentage for current timeframe
+atrUsedPerc = math.min(100, ((high - low) / currentATR) * 100)
+atrRemainPerc = 100 - atrUsedPerc
+
+// Determine ATR outcome based on current timeframe
+atrOutcome = atrRemainPerc > 60 ? "More Room 📈" : atrRemainPerc > 30 ? "Mid 🔄" : "Exhausted ⚠️"
+
+// Create ATR text for table - SIMPLIFIED (only current timeframe)
+atrText = "📊 ATR Analysis\n" +
+          "TF: " + tfDisplay + "\n" +
+          "Value: " + str.tostring(currentATR, "#.##") + "\n" +
+          "Used: " + str.tostring(atrUsedPerc, "#.#") + "%\n" +
+          "Remain: " + str.tostring(atrRemainPerc, "#.#") + "%\n" +
+          "Outcome: " + atrOutcome
+
+// ---------------- MSS & FVG ----------------
+var float lastSwingHigh = na
+var float lastSwingLow = na
+if not na(swingHigh)
+    lastSwingHigh := high[rightBars]
+if not na(swingLow)
+    lastSwingLow := low[rightBars]
+
+mssBull = not na(lastSwingHigh) and close > lastSwingHigh and trendUp
+mssBear = not na(lastSwingLow) and close < lastSwingLow and trendDown
+
+fvgBull = not na(low[2]) and not na(high[0]) and low[2] > high[0]
+fvgBear = not na(high[2]) and not na(low[0]) and high[2] < low[0]
+
+// ---------------- ENTRY CONDITIONS ----------------
+inDemand = false
+if array.size(demandTops) > 0
+    for i = 0 to array.size(demandTops) - 1
+        zoneTop = array.get(demandTops, i)
+        zoneBottom = array.get(demandBottoms, i)
+        if close >= zoneBottom and close <= zoneTop
+            inDemand := true
+            break
+
+inSupply = false
+if array.size(supplyTops) > 0
+    for i = 0 to array.size(supplyTops) - 1
+        zoneTop = array.get(supplyTops, i)
+        zoneBottom = array.get(supplyBottoms, i)
+        if close >= zoneBottom and close <= zoneTop
+            inSupply := true
+            break
+
+longCond = trendUp and inDemand and (mssBull or fvgBull) and not liqSweepDown and adx > 20
+shortCond = trendDown and inSupply and (mssBear or fvgBear) and not liqSweepUp and adx > 20
+
+buySignal = longCond and strategy.position_size == 0
+sellSignal = shortCond and strategy.position_size == 0
+
+// Risk math
+longSL = close * (1 - slPerc / 100)
+longTP = close + (close - longSL) * riskReward
+shortSL = close * (1 + slPerc / 100)
+shortTP = close - (shortSL - close) * riskReward
+
+if buySignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=longSL, limit=longTP)
+if sellSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=shortSL, limit=shortTP)
+
+// ---------------- ZONE LINES ----------------
+var line demandLine1 = na
+var line demandLine2 = na
+var line supplyLine1 = na
+var line supplyLine2 = na
+
+if showZones and barstate.islast
+    if array.size(demandTops) > 0
+        if not na(demandLine1)
+            line.delete(demandLine1)
+        if not na(demandLine2)
+            line.delete(demandLine2)
+        zoneTop = array.get(demandTops, 0)
+        zoneBottom = array.get(demandBottoms, 0)
+        demandLine1 := line.new(bar_index-100, zoneTop, bar_index+100, zoneTop, color=color.new(color.green, 70), width=2, extend=extend.both)
+        demandLine2 := line.new(bar_index-100, zoneBottom, bar_index+100, zoneBottom, color=color.new(color.green, 50), width=1, extend=extend.both)
+
+    if array.size(supplyTops) > 0
+        if not na(supplyLine1)
+            line.delete(supplyLine1)
+        if not na(supplyLine2)
+            line.delete(supplyLine2)
+        zoneTop = array.get(supplyTops, 0)
+        zoneBottom = array.get(supplyBottoms, 0)
+        supplyLine1 := line.new(bar_index-100, zoneTop, bar_index+100, zoneTop, color=color.new(color.red, 70), width=2, extend=extend.both)
+        supplyLine2 := line.new(bar_index-100, zoneBottom, bar_index+100, zoneBottom, color=color.new(color.red, 50), width=1, extend=extend.both)
+
+// ---------------- OPPOSITE PAIR DETECTION ----------------
+pair = syminfo.ticker
+
+oppositePair =
+     str.contains(pair, "EURUSD") ? "USDCHF" :
+     str.contains(pair, "GBPUSD") ? "USDJPY" :
+     str.contains(pair, "AUDUSD") ? "USDCAD" :
+     str.contains(pair, "NZDUSD") ? "USDJPY" :
+     str.contains(pair, "USDJPY") ? "GBPUSD" :
+     str.contains(pair, "XAUUSD") ? "DXY" :
+     (str.contains(pair, "BTC") or str.contains(pair, "ETH") or str.contains(pair, "USDT")) ? "USDT.D" :
+     "N/A"
+
+// ---------------- LONG TERM TREND ANALYSIS ----------------
+lt_4h_fast = request.security(syminfo.tickerid, "240", ta.sma(close, 50), lookahead=barmerge.lookahead_off)
+lt_4h_slow = request.security(syminfo.tickerid, "240", ta.sma(close, 200), lookahead=barmerge.lookahead_off)
+
+lt_1d_fast = request.security(syminfo.tickerid, "D", ta.sma(close, 50), lookahead=barmerge.lookahead_off)
+lt_1d_slow = request.security(syminfo.tickerid, "D", ta.sma(close, 200), lookahead=barmerge.lookahead_off)
+
+ltUp = (lt_4h_fast > lt_4h_slow) and (lt_1d_fast > lt_1d_slow)
+ltDown = (lt_4h_fast < lt_4h_slow) and (lt_1d_fast < lt_1d_slow)
+
+ltBias = ltUp ? "📘 BUY ONLY" : ltDown ? "📕 SELL ONLY" : "⚪ Neutral"
+ltColor = ltUp ? color.new(color.green, 60) : ltDown ? color.new(color.red, 60) : color.new(color.orange, 60)
+
+// ---------------- OPTION ENGINE ----------------
+callCondition = trendUp and not inSupply and (mssBull or fvgBull)
+putCondition  = trendDown and not inDemand and (mssBear or fvgBear)
+optionSignal  = callCondition ? "CALL 🔼" : putCondition ? "PUT 🔽" : "WAIT ⚪"
+
+// ---------------- PATTERN DETECTION ----------------
+var string patternName = "No clear pattern"
+var string patternOutcome = "Neutral"
+
+// Optimized pattern detection - only update on barstate.islast or new pivot
+if barstate.islast or not na(swingHigh) or not na(swingLow)
+    patternName := "No clear pattern"
+    patternOutcome := "Neutral"
+
+    // Double Top / Bottom
+    if array.size(highPivotsArr) >= 2
+        h1 = array.get(highPivotsArr, 0)
+        h2 = array.get(highPivotsArr, 1)
+        tol = doubleTolerancePerc / 100.0
+        if math.abs(h1 - h2) <= math.max(h1, h2) * tol and close < math.min(h1, h2)
+            patternName := "Double Top"
+            patternOutcome := "🔻 Bearish Reversal (~70%)"
+
+    if array.size(lowPivotsArr) >= 2
+        l1 = array.get(lowPivotsArr, 0)
+        l2 = array.get(lowPivotsArr, 1)
+        tol = doubleTolerancePerc / 100.0
+        if math.abs(l1 - l2) <= math.max(l1, l2) * tol and close > math.max(l1, l2)
+            patternName := "Double Bottom"
+            patternOutcome := "🚀 Bullish Reversal (~72%)"
+
+    // Head & Shoulders
+    if array.size(highPivotsArr) >= 3
+        hh1 = array.get(highPivotsArr, 2)
+        hh2 = array.get(highPivotsArr, 1)
+        hh3 = array.get(highPivotsArr, 0)
+        shoulderTol = doubleTolerancePerc / 100.0
+        if hh2 > hh1 and hh2 > hh3 and math.abs(hh1 - hh3) <= math.max(hh1, hh3) * shoulderTol
+            patternName := "Head & Shoulders"
+            patternOutcome := "🔻 Strong Bear Reversal (~75%)"
+
+    // Inverted H&S
+    if array.size(lowPivotsArr) >= 3
+        ll1 = array.get(lowPivotsArr, 2)
+        ll2 = array.get(lowPivotsArr, 1)
+        ll3 = array.get(lowPivotsArr, 0)
+        shoulderTol = doubleTolerancePerc / 100.0
+        if ll2 < ll1 and ll2 < ll3 and math.abs(ll1 - ll3) <= math.max(ll1, ll3) * shoulderTol
+            patternName := "Inverted H&S"
+            patternOutcome := "🚀 Strong Bull Reversal (~75%)"
+
+    // Triangle detection
+    window = math.min(patternLookback, 30)
+    firstHigh = high[window - 1]
+    lastHigh  = high
+    firstLow  = low[window - 1]
+    lastLow   = low
+    highSlope = (lastHigh - firstHigh) / window / math.abs(firstHigh)
+    lowSlope  = (lastLow - firstLow) / window / math.abs(firstLow)
+
+    isHighFlat = math.abs(highSlope) < triangleSlopeThreshold
+    isLowFlat  = math.abs(lowSlope)  < triangleSlopeThreshold
+    isLowRising = lowSlope > triangleSlopeThreshold
+    isHighFalling = highSlope < -triangleSlopeThreshold
+
+    if isHighFlat and isLowRising
+        patternName := "Ascending Triangle"
+        patternOutcome := "🚀 Bullish Breakout (~68%)"
+    else if isLowFlat and isHighFalling
+        patternName := "Descending Triangle"
+        patternOutcome := "🔻 Bearish Breakdown (~65%)"
+    else if highSlope < 0 and lowSlope > 0 and math.abs(highSlope) > triangleSlopeThreshold and math.abs(lowSlope) > triangleSlopeThreshold
+        patternName := "Symmetrical Triangle"
+        patternOutcome := "⚡ Breakout Either Side (~55%)"
+
+// Pattern label on chart
+if showPatternOnChart and barstate.islast
+    lblTxt = "Pattern: " + patternName + "\nOutcome: " + patternOutcome
+    label.new(bar_index, high, lblTxt, xloc=xloc.bar_index, yloc=yloc.abovebar, style=label.style_label_left, color=color.new(color.blue, 80), textcolor=color.white, size=size.small)
+
+// ---------------- SIGNAL TABLE ----------------
+tableTextColor = color.black
+
+var table signalTable = table.new(position.top_right, 2, 16, bgcolor=color.new(color.white, 5), border_width=3, border_color=color.new(#00bcd4, 30))
+
+if showSignals and barstate.islast
+    // Header row
+    table.cell(signalTable, 0, 0, "⚡ SIGNAL STATUS", text_color=color.white, bgcolor=color.new(#1e88e5, 0), text_size=size.normal)
+    
+    // Signal status section (rows 1-6)
+    table.cell(signalTable, 0, 1, "Trend", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 2, "In Zone", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 3, "MSS", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 4, "FVG", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 5, "Position", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 6, "Signal", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    
+    // Separator row
+    table.cell(signalTable, 0, 7, "━━━━━━━━━━━━━━━", text_color=color.black, bgcolor=color.new(#ffd54f, 30))
+    
+    // Trend analysis section (rows 8-15)
+    table.cell(signalTable, 0, 8, "ATR Analysis", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 9, "Trend Stage", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 10, "ADX / RSI", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 11, "Pattern", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 12, "Outcome", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 13, "Option Type", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 14, "🔄 Opposite Pair", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+    table.cell(signalTable, 0, 15, "📅 Long-Term Bias", text_color=tableTextColor, bgcolor=color.new(#e3f2fd, 0))
+
+    // Column 1 values
+    trendBg = trendUp ? color.new(#c8e6c9, 0) : trendDown ? color.new(#ffcdd2, 0) : color.new(#fff9c4, 0)
+    table.cell(signalTable, 1, 1, trendUp ? "⬆️ UP" : trendDown ? "⬇️ DOWN" : "➡️ NEUTRAL", text_color=tableTextColor, bgcolor=trendBg)
+    
+    zoneBg = inDemand ? color.new(#a5d6a7, 0) : inSupply ? color.new(#ef9a9a, 0) : color.new(#e0e0e0, 0)
+    table.cell(signalTable, 1, 2, inDemand ? "🟢 DEMAND" : inSupply ? "🔴 SUPPLY" : "⚪ NONE", text_color=tableTextColor, bgcolor=zoneBg)
+    
+    mssBg = mssBull ? color.new(#81c784, 0) : mssBear ? color.new(#e57373, 0) : color.new(#e0e0e0, 0)
+    table.cell(signalTable, 1, 3, mssBull ? "🐂 BULL" : mssBear ? "🐻 BEAR" : "⚪ NONE", text_color=tableTextColor, bgcolor=mssBg)
+    
+    fvgBg = fvgBull ? color.new(#66bb6a, 0) : fvgBear ? color.new(#ef5350, 0) : color.new(#e0e0e0, 0)
+    table.cell(signalTable, 1, 4, fvgBull ? "📈 BULL" : fvgBear ? "📉 BEAR" : "⚪ NONE", text_color=tableTextColor, bgcolor=fvgBg)
+    
+    posBg = strategy.position_size > 0 ? color.new(#4caf50, 30) : strategy.position_size < 0 ? color.new(#f44336, 30) : color.new(#9e9e9e, 30)
+    table.cell(signalTable, 1, 5, strategy.position_size > 0 ? "📈 LONG" : strategy.position_size < 0 ? "📉 SHORT" : "💤 FLAT", text_color=tableTextColor, bgcolor=posBg)
+    
+    signalBgColor = buySignal ? color.new(#4caf50, 0) : sellSignal ? color.new(#f44336, 0) : color.new(#9e9e9e, 30)
+    table.cell(signalTable, 1, 6, buySignal ? "🟢 BUY NOW" : sellSignal ? "🔴 SELL NOW" : "⚪ WAIT", text_color=color.white, bgcolor=signalBgColor, text_size=size.large)
+    
+    // Separator row value
+    table.cell(signalTable, 1, 7, "TREND ANALYSIS", text_color=color.white, bgcolor=color.new(#ffa726, 0))
+    
+    // ATR Analysis - SIMPLIFIED (only current timeframe)
+    atrBg = trendUp ? color.new(#c8e6c9, 30) : trendDown ? color.new(#ffcdd2, 30) : color.new(#fff9c4, 30)
+    table.cell(signalTable, 1, 8, atrText, text_color=tableTextColor, bgcolor=atrBg)
+    
+    trendStageText = isUpTrend ? (rsi < 55 ? "🚀 Early Rally" : rsi < 70 ? "📈 Mid Rally" : "🔥 Deep Rally") : isDownTrend ? (rsi > 45 ? "⚠️ Early Fall" : rsi > 30 ? "📉 Mid Fall" : "💥 Deep Fall") : "➡️ Sideways"
+    trendStageBg = isUpTrend ? color.new(#81c784, 30) : isDownTrend ? color.new(#e57373, 30) : color.new(#ffb74d, 30)
+    table.cell(signalTable, 1, 9, trendStageText, text_color=tableTextColor, bgcolor=trendStageBg)
+    
+    adxStrength = adx > 35 ? "💪 Strong" : adx > 25 ? "👍 Good" : "😴 Weak"
+    adxBg = adx > 35 ? color.new(#4caf50, 30) : adx > 25 ? color.new(#8bc34a, 30) : color.new(#ffb74d, 30)
+    table.cell(signalTable, 1, 10, str.tostring(adx, "#.#") + " / " + str.tostring(rsi, "#.#") + "\n" + adxStrength, text_color=tableTextColor, bgcolor=adxBg)
+    
+    table.cell(signalTable, 1, 11, patternName, text_color=tableTextColor, bgcolor=color.new(#b39ddb, 30))
+    table.cell(signalTable, 1, 12, patternOutcome, text_color=tableTextColor, bgcolor=color.new(#90caf9, 30))
+    table.cell(signalTable, 1, 13, optionSignal, text_color=tableTextColor, bgcolor=color.new(#80deea, 30))
+    table.cell(signalTable, 1, 14, oppositePair, text_color=tableTextColor, bgcolor=color.new(#a5d6a7, 30))
+    table.cell(signalTable, 1, 15, ltBias, text_color=tableTextColor, bgcolor=ltColor)
+
+// ---------------- PLOTTING ----------------
+plot(emaFast, color=color.orange, title="Fast EMA", linewidth=2)
+plot(emaSlow, color=color.blue, title="Slow EMA", linewidth=2)
+plot(showSLTP and strategy.position_size > 0 ? longSL : na, color=color.red, style=plot.style_linebr, linewidth=2, title="Stop Loss")
+plot(showSLTP and strategy.position_size > 0 ? longTP : na, color=color.green, style=plot.style_linebr, linewidth=2, title="Take Profit")
+plot(showSLTP and strategy.position_size < 0 ? shortSL : na, color=color.red, style=plot.style_linebr, linewidth=2, title="Short Stop Loss")
+plot(showSLTP and strategy.position_size < 0 ? shortTP : na, color=color.green, style=plot.style_linebr, linewidth=2, title="Short Take Profit")
+bgcolor(trendUp ? color.new(color.green, 97) : trendDown ? color.new(color.red, 97) : na, title="Trend Background")
+plotshape(showSignals and buySignal, style=shape.labelup, location=location.belowbar, color=color.new(color.green, 0), textcolor=color.white, text="BUY", size=size.normal, title="BUY SIGNAL")
+plotshape(showSignals and sellSignal, style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, text="SELL", size=size.normal, title="SELL SIGNAL")
+plotshape(showComponents and longCond, style=shape.triangleup, location=location.belowbar, color=color.lime, size=size.small, title="Long Condition")
+plotshape(showComponents and shortCond, style=shape.triangledown, location=location.abovebar, color=color.fuchsia, size=size.small, title="Short Condition")
+plotshape(showComponents and liqSweepUp, style=shape.xcross, location=location.abovebar, color=color.orange, size=size.tiny, title="Liquidity Sweep Up")
+plotshape(showComponents and liqSweepDown, style=shape.xcross, location=location.belowbar, color=color.purple, size=size.tiny, title="Liquidity Sweep Down")
+
+// ---------------- ALERTS ----------------
+alertcondition(buySignal, title="BUY SIGNAL", message="🟢 BUY SIGNAL: All conditions met for long entry. Price: {{close}}")
+alertcondition(sellSignal, title="SELL SIGNAL", message="🔴 SELL SIGNAL: All conditions met for short entry. Price: {{close}}")
+alertcondition(buySignal or sellSignal, title="TRADE SIGNAL", message="⚡ TRADE SIGNAL: {{ticker}} - {{interval}} - Entry at {{close}}")
+alertcondition(strategy.position_size > 0 and strategy.position_size[1] == 0, title="LONG ENTRY", message="📈 LONG POSITION OPENED: {{ticker}} at {{close}}")
+alertcondition(strategy.position_size < 0 and strategy.position_size[1] == 0, title="SHORT ENTRY", message="📉 SHORT POSITION OPENED: {{ticker}} at {{close}}")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, title="POSITION CLOSED", message="❌ POSITION CLOSED: {{ticker}} at {{close}}")
